@@ -16,10 +16,21 @@ const SOURCE_TOKENS = [
   '=42bzpmL0NXZmlmbh12LiVHbj5Cc11WYlJWL5JWYi5yc05WZyJ3b01SYjVnehJnYtQmMwcjZ5I2Y4MGN58yL6MHc0RHa',
   'u92cq5CdzVmZp5WYt9idlRmLzJXZrJ3b35SZsV3cwF2YjlGdjFGbhdmLvlmd0pHd59yL6MHc0RHa',
   '=42bzpmL0NXZmlmbh12LsFmLu9mc0NWZsVmL41WYlJHdz9yL6MHc0RHa',
-  '=42bzpmL0NXZmlmbh12LlRXas9CdhxmLi1meuIHdz9yL6MHc0RHa'
+  '=42bzpmL0NXZmlmbh12LlRXas9CdhxmLi1meuIHdz9yL6MHc0RHa',
+  '=42bzpmL0NXZmlmbh12L2VGZuMncltmcvdnLyQnblJncvR3bu5ibvRGZh9yL6MHc0RHa',
+  '==gbvNnauQ3clZWauFWbvcmcv5SbyR3c09yL6MHc0RHa',
+  'u92cq5CdzVmZp5WYt9SbvNmLyVGZuVmcu9mLz1WYlJHdzFGb1JWZu9yL6MHc0RHa'
 ];
 
 const SOURCE_URLS = SOURCE_TOKENS.map(unpack);
+const DEFAULT_TRACKERS = [
+  'udp://tracker.opentrackr.org:1337/announce',
+  'udp://open.stealth.si:80/announce',
+  'udp://tracker.openbittorrent.com:80/announce',
+  'udp://exodus.desync.com:6969/announce',
+  'udp://tracker.torrent.eu.org:451/announce',
+  'udp://open.demonii.com:1337/announce'
+];
 const ASSET_DIR = path.join(__dirname, 'assets');
 const ASSETS = {
   '/assets/logo.png': {
@@ -226,11 +237,10 @@ function normalizeStream(rawStream) {
   const stream = { ...rawStream };
   const meta = analyzeStream(stream);
   const quality = qualityLabel(meta.quality);
-  const titleParts = [quality];
+  const peerText = meta.peers !== null ? `${meta.peers} peers` : 'peers unavailable';
+  const titleParts = [`${quality} | ${peerText}`];
 
-  if (meta.peers !== null) {
-    titleParts.push(`${meta.peers} peers`);
-  }
+  attachDefaultTrackers(stream);
 
   if (meta.sizeText) {
     titleParts.push(meta.sizeText);
@@ -244,7 +254,7 @@ function normalizeStream(rawStream) {
     titleParts.push(meta.audio);
   }
 
-  stream.name = `${ADDON_NAME} ${quality}`;
+  stream.name = `${ADDON_NAME} ${quality} | ${peerText}`;
   stream.title = titleParts.join('\n');
   stream.behaviorHints = {
     ...(stream.behaviorHints || {}),
@@ -363,10 +373,11 @@ function extractPeers(stream, text) {
   }
 
   const patterns = [
+    /(?:\uD83D\uDC64|\uD83D\uDC65)\s*([0-9][0-9.,]*\s*[kKmM]?)(?::[0-9][0-9.,]*\s*[kKmM]?)?/i,
+    /(?:seeders?|seeds?|peers?)\s*\/\s*(?:leechers?|leeches?)\s*[:=-]?\s*([0-9][0-9.,]*\s*[kKmM]?)/i,
     /\b(?:seeders?|seeds?|peers?)\b\s*[:=-]?\s*([0-9][0-9.,]*\s*[kKmM]?)/i,
     /([0-9][0-9.,]*\s*[kKmM]?)\s*\b(?:seeders?|seeds?|peers?)\b/i,
-    /\bS(?:eed)?\s*[:=-]\s*([0-9][0-9.,]*\s*[kKmM]?)/,
-    /(?:\uD83D\uDC64|\uD83D\uDC65)\s*([0-9][0-9.,]*\s*[kKmM]?)/i
+    /\bS(?:eed)?\s*[:=-]\s*([0-9][0-9.,]*\s*[kKmM]?)/i
   ];
 
   for (const pattern of patterns) {
@@ -379,6 +390,28 @@ function extractPeers(stream, text) {
   }
 
   return null;
+}
+
+function attachDefaultTrackers(stream) {
+  const infoHash = String(stream.infoHash || extractInfoHash(stream.url || stream.externalUrl || '')).toLowerCase();
+
+  if (!infoHash) {
+    return;
+  }
+
+  const existingSources = Array.isArray(stream.sources) ? stream.sources : [];
+  const extraSources = DEFAULT_TRACKERS.map((tracker) => `tracker:${tracker}`);
+  const dhtSource = `dht:${infoHash}`;
+  const seen = new Set(existingSources);
+
+  for (const source of [...extraSources, dhtSource]) {
+    if (!seen.has(source)) {
+      existingSources.push(source);
+      seen.add(source);
+    }
+  }
+
+  stream.sources = existingSources;
 }
 
 function extractQuality(text) {
