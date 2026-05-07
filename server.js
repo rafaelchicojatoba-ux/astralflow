@@ -66,7 +66,7 @@ let fallbackLogoBuffer;
 
 const baseManifest = {
   id: 'community.astralflow.private',
-  version: '1.0.7',
+  version: '1.0.8',
   name: ADDON_NAME,
   description: 'Streams sorted by seeders and quality.',
   resources: ['stream'],
@@ -244,26 +244,10 @@ function prepareStream(rawStream) {
 
   const stream = { ...rawStream };
   const meta = analyzeStream(stream);
-  const quality = qualityLabel(meta.quality);
-  const swarmText = formatSwarm(meta, stream);
-  const titleParts = [`${quality} | ${swarmText}`];
 
   attachDefaultTrackers(stream);
-
-  if (meta.sizeText) {
-    titleParts.push(meta.sizeText);
-  }
-
-  if (meta.codec) {
-    titleParts.push(meta.codec);
-  }
-
-  if (meta.audio) {
-    titleParts.push(meta.audio);
-  }
-
-  stream.name = `${ADDON_NAME} ${quality} | ${swarmText}`;
-  stream.title = titleParts.join('\n');
+  stream.name = ADDON_NAME;
+  stream.title = buildDisplayTitle(rawStream, meta);
 
   if (meta.seeders !== null && meta.seeders !== undefined) {
     stream.seeders = meta.seeders;
@@ -323,6 +307,43 @@ function analyzeStream(stream) {
     codec: extractCodec(text),
     audio: extractAudio(text)
   };
+}
+
+function buildDisplayTitle(rawStream, meta) {
+  const originalTitle = sanitizeDisplayText(rawStream.title || rawStream.description || rawStream.name || '');
+
+  if (originalTitle) {
+    return originalTitle;
+  }
+
+  const quality = qualityLabel(meta.quality);
+  const details = [quality];
+
+  if (meta.seeders !== null && meta.seeders !== undefined) {
+    details.push(`👤 ${meta.seeders}`);
+  } else if (meta.peers !== null && meta.peers !== undefined) {
+    details.push(`👤 ${meta.peers}`);
+  }
+
+  if (meta.sizeText) {
+    details.push(`💾 ${meta.sizeText}`);
+  }
+
+  return details.join(' ');
+}
+
+function sanitizeDisplayText(value) {
+  return String(value || '')
+    .split(/\r?\n/)
+    .map((line) => line
+      .replace(/\s*🔗\s*[^\n]+/g, '')
+      .replace(/\s*📡\s*[^\n]+/g, '')
+      .replace(/\s*⚙️\s*(?:BaixaFilmesTorrentHD|Torrentio|Bitmagnet|Uindex|Moviebox|Cinestream|Vidlink|Vixsrc|Castle|Hdhub4u|4khdhub|EZTV)\b.*$/i, '')
+      .replace(/\s+-\s*(?:YIFY|YTS|RARBG|EZTV|TGx|GalaxyTV)\s*$/i, ' -')
+      .trimEnd())
+    .filter((line) => line.trim() && !/upgrade to premium/i.test(line))
+    .join('\n')
+    .trim();
 }
 
 function compareStreams(left, right) {
