@@ -9,7 +9,7 @@ const ADDON_NAME = 'Astral Flow';
 const PUBLIC_URL = normalizePublicUrl(process.env.PUBLIC_URL);
 const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 9000);
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 45000);
-const MAX_STREAMS = Number(process.env.MAX_STREAMS || 120);
+const MAX_STREAMS = Number(process.env.MAX_STREAMS || 0);
 
 const SOURCE_TOKENS = [
   '==gbvNnauQ3clZWauFWbv4Wdm5SblJHdz5yc1xGctkXYiVGdhJXawVGa09yL6MHc0RHa',
@@ -66,7 +66,7 @@ let fallbackLogoBuffer;
 
 const baseManifest = {
   id: 'community.astralflow.private',
-  version: '1.0.6',
+  version: '1.0.7',
   name: ADDON_NAME,
   description: 'Streams sorted by seeders and quality.',
   resources: ['stream'],
@@ -134,21 +134,19 @@ async function getStreams(type, id) {
 
   const streams = settled
     .flatMap((result) => result.status === 'fulfilled' ? result.value : [])
-    .map(normalizeStream)
-    .filter(Boolean)
-    .filter(({ stream }) => isPlayableStream(stream));
+    .map(prepareStream)
+    .filter(Boolean);
 
-  const sorted = dedupeStreams(streams)
-    .sort(compareStreams)
-    .slice(0, MAX_STREAMS)
-    .map(({ stream }) => stream);
+  const sorted = streams.sort(compareStreams);
+  const limited = MAX_STREAMS > 0 ? sorted.slice(0, MAX_STREAMS) : sorted;
+  const result = limited.map(({ stream }) => stream);
 
   streamCache.set(cacheKey, {
     createdAt: Date.now(),
-    streams: sorted
+    streams: result
   });
 
-  return sorted;
+  return result;
 }
 
 function buildManifest(req) {
@@ -239,7 +237,7 @@ async function fetchSourceStreams(sourceUrl, type, id) {
   }
 }
 
-function normalizeStream(rawStream) {
+function prepareStream(rawStream) {
   if (!rawStream || typeof rawStream !== 'object') {
     return null;
   }
@@ -334,21 +332,6 @@ function compareStreams(left, right) {
     right.size - left.size ||
     left.leechers - right.leechers ||
     stableKey(left.stream).localeCompare(stableKey(right.stream));
-}
-
-function dedupeStreams(items) {
-  const bestByKey = new Map();
-
-  for (const item of items) {
-    const key = stableKey(item.stream);
-    const current = bestByKey.get(key);
-
-    if (!current || compareStreams(item, current) < 0) {
-      bestByKey.set(key, item);
-    }
-  }
-
-  return [...bestByKey.values()];
 }
 
 function stableKey(stream) {
@@ -545,31 +528,6 @@ function isTorrentStream(stream) {
   return Array.isArray(stream.sources) && stream.sources.some((source) => (
     typeof source === 'string' && /^(tracker:|dht:)/i.test(source)
   ));
-}
-
-function isPlayableStream(stream) {
-  if (stream.infoHash || stream.ytId || isHttpUrl(stream.url)) {
-    return true;
-  }
-
-  if (typeof stream.magnet === 'string' && stream.magnet.startsWith('magnet:')) {
-    return true;
-  }
-
-  return false;
-}
-
-function isHttpUrl(value) {
-  if (!value) {
-    return false;
-  }
-
-  try {
-    const url = new URL(value);
-    return url.protocol === 'http:' || url.protocol === 'https:';
-  } catch {
-    return false;
-  }
 }
 
 function attachDefaultTrackers(stream) {
