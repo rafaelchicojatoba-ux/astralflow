@@ -66,7 +66,7 @@ let fallbackLogoBuffer;
 
 const baseManifest = {
   id: 'community.astralflow.private',
-  version: '1.0.3',
+  version: '1.0.6',
   name: ADDON_NAME,
   description: 'Streams sorted by seeders and quality.',
   resources: ['stream'],
@@ -135,7 +135,8 @@ async function getStreams(type, id) {
   const streams = settled
     .flatMap((result) => result.status === 'fulfilled' ? result.value : [])
     .map(normalizeStream)
-    .filter(Boolean);
+    .filter(Boolean)
+    .filter(({ stream }) => isPlayableStream(stream));
 
   const sorted = dedupeStreams(streams)
     .sort(compareStreams)
@@ -265,21 +266,17 @@ function normalizeStream(rawStream) {
 
   stream.name = `${ADDON_NAME} ${quality} | ${swarmText}`;
   stream.title = titleParts.join('\n');
-  stream.description = stream.title;
 
   if (meta.seeders !== null && meta.seeders !== undefined) {
     stream.seeders = meta.seeders;
-  } else {
-    delete stream.seeders;
-    delete stream.seeds;
+  }
+
+  if (meta.peers !== null && meta.peers !== undefined) {
+    stream.peers = meta.peers;
   }
 
   if (meta.leechers !== null && meta.leechers !== undefined) {
     stream.leechers = meta.leechers;
-  } else {
-    delete stream.leechers;
-    delete stream.leeches;
-    delete stream.leech;
   }
 
   stream.behaviorHints = {
@@ -288,12 +285,14 @@ function normalizeStream(rawStream) {
   };
 
   delete stream.behaviorHints.filename;
+  delete stream.description;
   delete stream.filename;
   delete stream.tag;
 
   return {
     stream,
     seeders: meta.seeders ?? 0,
+    peers: meta.peers ?? 0,
     leechers: meta.leechers ?? 0,
     quality: meta.quality ?? 0,
     size: meta.size ?? 0
@@ -330,6 +329,7 @@ function analyzeStream(stream) {
 
 function compareStreams(left, right) {
   return right.seeders - left.seeders ||
+    right.peers - left.peers ||
     right.quality - left.quality ||
     right.size - left.size ||
     left.leechers - right.leechers ||
@@ -398,10 +398,13 @@ function extractSwarm(stream, text) {
   const seeders = firstNumber([
     stream.seeders,
     stream.seeds,
+    stream.behaviorHints && stream.behaviorHints.seeders,
+    stream.behaviorHints && stream.behaviorHints.seeds
+  ]);
+
+  const peers = firstNumber([
     stream.peers,
     stream.peer,
-    stream.behaviorHints && stream.behaviorHints.seeders,
-    stream.behaviorHints && stream.behaviorHints.seeds,
     stream.behaviorHints && stream.behaviorHints.peers
   ]);
 
@@ -418,6 +421,7 @@ function extractSwarm(stream, text) {
 
   return {
     seeders: seeders ?? pairedFields?.seeders ?? textSwarm.seeders,
+    peers: peers ?? textSwarm.peers,
     leechers: leechers ?? pairedFields?.leechers ?? textSwarm.leechers
   };
 }
@@ -465,6 +469,11 @@ function extractSwarmFromText(text) {
       /([0-9][0-9.,]*\s*[kKmM]?)\s*\b(?:seeders?|seeds?)\b/i,
       /\bS(?:eed)?\s*[:=-]\s*([0-9][0-9.,]*\s*[kKmM]?)/i
     ]),
+    peers: firstTextNumber(value, [
+      /\b(?:peers?)\b\s*[:=-]?\s*([0-9][0-9.,]*\s*[kKmM]?)/i,
+      /([0-9][0-9.,]*\s*[kKmM]?)\s*\b(?:peers?)\b/i,
+      /\bP(?:eer)?\s*[:=-]\s*([0-9][0-9.,]*\s*[kKmM]?)/i
+    ]),
     leechers: firstTextNumber(value, [
       /\b(?:leechers?|leeches?)\b\s*[:=-]?\s*([0-9][0-9.,]*\s*[kKmM]?)/i,
       /([0-9][0-9.,]*\s*[kKmM]?)\s*\b(?:leechers?|leeches?)\b/i,
@@ -500,16 +509,28 @@ function firstTextNumber(text, patterns) {
 
 function formatSwarm(meta, stream) {
   const hasSeeders = meta.seeders !== null && meta.seeders !== undefined;
+  const hasPeers = meta.peers !== null && meta.peers !== undefined;
   const hasLeechers = meta.leechers !== null && meta.leechers !== undefined;
 
-  if (!hasSeeders && !hasLeechers && !isTorrentStream(stream)) {
+  if (!hasSeeders && !hasPeers && !hasLeechers && !isTorrentStream(stream)) {
     return 'Direct';
   }
 
-  const seeders = hasSeeders ? meta.seeders : 'n/a';
-  const leechers = hasLeechers ? meta.leechers : 'n/a';
+  const parts = [];
 
-  return `S: ${seeders} | L: ${leechers}`;
+  if (hasSeeders) {
+    parts.push(`S: ${meta.seeders}`);
+  }
+
+  if (hasPeers) {
+    parts.push(`P: ${meta.peers}`);
+  }
+
+  if (hasLeechers) {
+    parts.push(`L: ${meta.leechers}`);
+  }
+
+  return parts.length ? parts.join(' | ') : 'Swarm n/a';
 }
 
 function isTorrentStream(stream) {
@@ -524,6 +545,31 @@ function isTorrentStream(stream) {
   return Array.isArray(stream.sources) && stream.sources.some((source) => (
     typeof source === 'string' && /^(tracker:|dht:)/i.test(source)
   ));
+}
+
+function isPlayableStream(stream) {
+  if (stream.infoHash || stream.ytId || isHttpUrl(stream.url)) {
+    return true;
+  }
+
+  if (typeof stream.magnet === 'string' && stream.magnet.startsWith('magnet:')) {
+    return true;
+  }
+
+  return false;
+}
+
+function isHttpUrl(value) {
+  if (!value) {
+    return false;
+  }
+
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch {
+    return false;
+  }
 }
 
 function attachDefaultTrackers(stream) {
