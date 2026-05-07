@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const PORT = Number(process.env.PORT || 7000);
+const ADDON_NAME = 'Astral Flow';
 const PUBLIC_URL = normalizePublicUrl(process.env.PUBLIC_URL);
 const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 9000);
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 45000);
@@ -42,11 +43,12 @@ const ASSETS = {
     contentType: 'image/png'
   }
 };
+let fallbackLogoBuffer;
 
 const baseManifest = {
   id: 'community.astralflow.private',
   version: '1.0.0',
-  name: 'Astral Flow',
+  name: ADDON_NAME,
   description: 'Streams sorted by peers and quality.',
   resources: ['stream'],
   types: ['movie', 'series'],
@@ -95,7 +97,7 @@ server.listen(PORT, () => {
   const localUrl = `http://localhost:${PORT}`;
   const baseUrl = PUBLIC_URL || localUrl;
 
-  console.log(`Astral Flow addon ready: ${baseUrl}/manifest.json`);
+  console.log(`${ADDON_NAME} addon ready: ${baseUrl}/manifest.json`);
   console.log(`Install URL: stremio://${baseUrl.replace(/^https?:\/\//, '')}/manifest.json`);
 });
 
@@ -142,6 +144,12 @@ function sendAsset(res, asset) {
   const assetPath = path.join(ASSET_DIR, asset.file);
 
   if (!fs.existsSync(assetPath)) {
+    const fallback = getFallbackLogo();
+
+    if (fallback) {
+      return sendBuffer(res, fallback, asset.contentType);
+    }
+
     return sendJson(res, 404, { error: 'Asset not found' });
   }
 
@@ -158,6 +166,30 @@ function sendAsset(res, asset) {
   });
 
   stream.pipe(res);
+}
+
+function sendBuffer(res, buffer, contentType) {
+  res.writeHead(200, {
+    'access-control-allow-origin': '*',
+    'cache-control': 'public, max-age=86400',
+    'content-length': buffer.length,
+    'content-type': contentType
+  });
+
+  return res.end(buffer);
+}
+
+function getFallbackLogo() {
+  if (fallbackLogoBuffer) {
+    return fallbackLogoBuffer;
+  }
+
+  try {
+    fallbackLogoBuffer = Buffer.from(require('./logo-fallback'), 'base64');
+    return fallbackLogoBuffer;
+  } catch {
+    return null;
+  }
 }
 
 async function fetchSourceStreams(sourceUrl, type, id) {
@@ -212,7 +244,7 @@ function normalizeStream(rawStream) {
     titleParts.push(meta.audio);
   }
 
-  stream.name = quality;
+  stream.name = `${ADDON_NAME} ${quality}`;
   stream.title = titleParts.join('\n');
   stream.behaviorHints = {
     ...(stream.behaviorHints || {}),
