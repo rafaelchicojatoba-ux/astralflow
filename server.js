@@ -1,0 +1,517 @@
+'use strict';
+
+const http = require('node:http');
+const fs = require('node:fs');
+const path = require('node:path');
+
+const PORT = Number(process.env.PORT || 7000);
+const PUBLIC_URL = normalizePublicUrl(process.env.PUBLIC_URL);
+const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 9000);
+const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 45000);
+const MAX_STREAMS = Number(process.env.MAX_STREAMS || 120);
+
+const SOURCE_TOKENS = [
+  '==gbvNnauQ3clZWauFWbv4Wdm5SblJHdz5yc1xGctkXYiVGdhJXawVGa09yL6MHc0RHa',
+  '=42bzpmL0NXZmlmbh12LiVHbj5Cc11WYlJWL5JWYi5yc05WZyJ3b01SYjVnehJnYtQmMwcjZ5I2Y4MGN58yL6MHc0RHa',
+  'u92cq5CdzVmZp5WYt9idlRmLzJXZrJ3b35SZsV3cwF2YjlGdjFGbhdmLvlmd0pHd59yL6MHc0RHa',
+  '=42bzpmL0NXZmlmbh12LsFmLu9mc0NWZsVmL41WYlJHdz9yL6MHc0RHa',
+  '=42bzpmL0NXZmlmbh12LlRXas9CdhxmLi1meuIHdz9yL6MHc0RHa'
+];
+
+const SOURCE_URLS = SOURCE_TOKENS.map(unpack);
+const ASSET_DIR = path.join(__dirname, 'assets');
+const ASSETS = {
+  '/assets/logo.png': {
+    file: 'logo-512.png',
+    contentType: 'image/png'
+  },
+  '/assets/logo-512.png': {
+    file: 'logo-512.png',
+    contentType: 'image/png'
+  },
+  '/assets/logo-256.png': {
+    file: 'logo-256.png',
+    contentType: 'image/png'
+  },
+  '/assets/logo-128.png': {
+    file: 'logo-128.png',
+    contentType: 'image/png'
+  },
+  '/assets/logo-original.png': {
+    file: 'logo-original.png',
+    contentType: 'image/png'
+  }
+};
+
+const baseManifest = {
+  id: 'community.astralflow.private',
+  version: '1.0.0',
+  name: 'Astral Flow',
+  description: 'Streams sorted by peers and quality.',
+  resources: ['stream'],
+  types: ['movie', 'series'],
+  catalogs: [],
+  idPrefixes: ['tt'],
+  behaviorHints: {
+    configurable: false,
+    configurationRequired: false
+  }
+};
+
+const streamCache = new Map();
+
+const server = http.createServer(async (req, res) => {
+  const requestUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+
+  if (req.method === 'OPTIONS') {
+    return sendJson(res, 204, {});
+  }
+
+  if (req.method !== 'GET') {
+    return sendJson(res, 405, { error: 'Method not allowed' });
+  }
+
+  if (requestUrl.pathname === '/' || requestUrl.pathname === '/manifest.json') {
+    return sendJson(res, 200, buildManifest(req));
+  }
+
+  if (ASSETS[requestUrl.pathname]) {
+    return sendAsset(res, ASSETS[requestUrl.pathname]);
+  }
+
+  const streamMatch = requestUrl.pathname.match(/^\/stream\/([^/]+)\/(.+)\.json$/);
+
+  if (streamMatch) {
+    const type = decodeURIComponent(streamMatch[1]);
+    const id = decodeURIComponent(streamMatch[2]);
+    const streams = await getStreams(type, id);
+    return sendJson(res, 200, { streams });
+  }
+
+  return sendJson(res, 404, { error: 'Not found' });
+});
+
+server.listen(PORT, () => {
+  const localUrl = `http://localhost:${PORT}`;
+  const baseUrl = PUBLIC_URL || localUrl;
+
+  console.log(`Astral Flow addon ready: ${baseUrl}/manifest.json`);
+  console.log(`Install URL: stremio://${baseUrl.replace(/^https?:\/\//, '')}/manifest.json`);
+});
+
+async function getStreams(type, id) {
+  const cacheKey = `${type}:${id}`;
+  const cached = streamCache.get(cacheKey);
+
+  if (cached && Date.now() - cached.createdAt < CACHE_TTL_MS) {
+    return cached.streams;
+  }
+
+  const settled = await Promise.allSettled(
+    SOURCE_URLS.map((sourceUrl) => fetchSourceStreams(sourceUrl, type, id))
+  );
+
+  const streams = settled
+    .flatMap((result) => result.status === 'fulfilled' ? result.value : [])
+    .map(normalizeStream)
+    .filter(Boolean);
+
+  const sorted = dedupeStreams(streams)
+    .sort(compareStreams)
+    .slice(0, MAX_STREAMS)
+    .map(({ stream }) => stream);
+
+  streamCache.set(cacheKey, {
+    createdAt: Date.now(),
+    streams: sorted
+  });
+
+  return sorted;
+}
+
+function buildManifest(req) {
+  const baseUrl = getBaseUrl(req);
+
+  return {
+    ...baseManifest,
+    logo: `${baseUrl}/assets/logo.png`
+  };
+}
+
+function sendAsset(res, asset) {
+  const assetPath = path.join(ASSET_DIR, asset.file);
+
+  if (!fs.existsSync(assetPath)) {
+    return sendJson(res, 404, { error: 'Asset not found' });
+  }
+
+  const stream = fs.createReadStream(assetPath);
+
+  stream.on('error', () => {
+    res.destroy();
+  });
+
+  res.writeHead(200, {
+    'access-control-allow-origin': '*',
+    'cache-control': 'public, max-age=86400',
+    'content-type': asset.contentType
+  });
+
+  stream.pipe(res);
+}
+
+async function fetchSourceStreams(sourceUrl, type, id) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(buildStreamUrl(sourceUrl, type, id), {
+      headers: {
+        accept: 'application/json',
+        'user-agent': 'AstralFlow/1.0'
+      },
+      signal: controller.signal
+    });
+
+    if (!response.ok) {
+      return [];
+    }
+
+    const payload = await response.json();
+    return Array.isArray(payload.streams) ? payload.streams : [];
+  } catch {
+    return [];
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function normalizeStream(rawStream) {
+  if (!rawStream || typeof rawStream !== 'object') {
+    return null;
+  }
+
+  const stream = { ...rawStream };
+  const meta = analyzeStream(stream);
+  const quality = qualityLabel(meta.quality);
+  const titleParts = [quality];
+
+  if (meta.peers !== null) {
+    titleParts.push(`${meta.peers} peers`);
+  }
+
+  if (meta.sizeText) {
+    titleParts.push(meta.sizeText);
+  }
+
+  if (meta.codec) {
+    titleParts.push(meta.codec);
+  }
+
+  if (meta.audio) {
+    titleParts.push(meta.audio);
+  }
+
+  stream.name = quality;
+  stream.title = titleParts.join('\n');
+  stream.behaviorHints = {
+    ...(stream.behaviorHints || {}),
+    bingeGroup: `sf-${meta.quality || 'auto'}-${stream.fileIdx ?? 0}`
+  };
+
+  delete stream.behaviorHints.filename;
+
+  return {
+    stream,
+    peers: meta.peers ?? 0,
+    quality: meta.quality ?? 0,
+    size: meta.size ?? 0
+  };
+}
+
+function analyzeStream(stream) {
+  const hints = stream.behaviorHints || {};
+  const text = [
+    stream.name,
+    stream.title,
+    stream.description,
+    stream.url,
+    stream.externalUrl,
+    hints.filename
+  ].filter(Boolean).join(' ');
+
+  const size = pickNumber(
+    hints.videoSize,
+    hints.size,
+    stream.size,
+    extractSizeBytes(text)
+  );
+
+  return {
+    peers: extractPeers(stream, text),
+    quality: extractQuality(text),
+    size,
+    sizeText: size ? formatBytes(size) : extractSizeText(text),
+    codec: extractCodec(text),
+    audio: extractAudio(text)
+  };
+}
+
+function compareStreams(left, right) {
+  return right.peers - left.peers ||
+    right.quality - left.quality ||
+    right.size - left.size ||
+    stableKey(left.stream).localeCompare(stableKey(right.stream));
+}
+
+function dedupeStreams(items) {
+  const bestByKey = new Map();
+
+  for (const item of items) {
+    const key = stableKey(item.stream);
+    const current = bestByKey.get(key);
+
+    if (!current || compareStreams(item, current) < 0) {
+      bestByKey.set(key, item);
+    }
+  }
+
+  return [...bestByKey.values()];
+}
+
+function stableKey(stream) {
+  const infoHash = String(stream.infoHash || '').toLowerCase();
+  const fileIdx = stream.fileIdx ?? '';
+
+  if (infoHash) {
+    return `${infoHash}:${fileIdx}`;
+  }
+
+  const urlHash = extractInfoHash(stream.url || stream.externalUrl || '');
+
+  if (urlHash) {
+    return `${urlHash}:${fileIdx}`;
+  }
+
+  return [
+    stream.url,
+    stream.externalUrl,
+    stream.ytId,
+    stream.name,
+    stream.title
+  ].filter(Boolean).join('|').toLowerCase();
+}
+
+function buildStreamUrl(manifestUrl, type, id) {
+  const target = new URL(manifestUrl);
+  const safeType = encodeURIComponent(type);
+  const safeId = encodeURIComponent(id).replace(/%3A/gi, ':');
+
+  target.pathname = target.pathname.replace(/manifest\.json$/i, `stream/${safeType}/${safeId}.json`);
+  target.search = '';
+  return target.toString();
+}
+
+function extractPeers(stream, text) {
+  const candidates = [
+    stream.seeders,
+    stream.seeds,
+    stream.peers,
+    stream.peer,
+    stream.behaviorHints && stream.behaviorHints.seeders,
+    stream.behaviorHints && stream.behaviorHints.seeds,
+    stream.behaviorHints && stream.behaviorHints.peers
+  ];
+
+  for (const candidate of candidates) {
+    const number = parseHumanNumber(candidate);
+    if (number !== null) {
+      return number;
+    }
+  }
+
+  const patterns = [
+    /(?:seeders?|seeds?|peers?|s)\s*[:=-]?\s*([0-9][0-9.,]*\s*[kKmM]?)/i,
+    /([0-9][0-9.,]*\s*[kKmM]?)\s*(?:seeders?|seeds?|peers?)/i,
+    /(?:\uD83D\uDC64|\uD83D\uDC65)\s*([0-9][0-9.,]*\s*[kKmM]?)/i
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    const number = match ? parseHumanNumber(match[1]) : null;
+
+    if (number !== null) {
+      return number;
+    }
+  }
+
+  return null;
+}
+
+function extractQuality(text) {
+  const normalized = String(text || '').toLowerCase();
+
+  if (/\b(?:2160p|4k|uhd)\b/.test(normalized)) return 2160;
+  if (/\b1440p\b/.test(normalized)) return 1440;
+  if (/\b1080p\b/.test(normalized)) return 1080;
+  if (/\b720p\b/.test(normalized)) return 720;
+  if (/\b576p\b/.test(normalized)) return 576;
+  if (/\b480p\b/.test(normalized)) return 480;
+  if (/\b360p\b/.test(normalized)) return 360;
+  if (/\b(?:cam|ts|tc)\b/.test(normalized)) return 240;
+
+  return 0;
+}
+
+function qualityLabel(quality) {
+  if (quality >= 2160) return '4K';
+  if (quality >= 1440) return '1440p';
+  if (quality >= 1080) return '1080p';
+  if (quality >= 720) return '720p';
+  if (quality >= 576) return '576p';
+  if (quality >= 480) return '480p';
+  if (quality >= 360) return '360p';
+  if (quality > 0) return 'SD';
+
+  return 'Auto';
+}
+
+function extractCodec(text) {
+  const normalized = String(text || '').toLowerCase();
+
+  if (/\b(?:x265|h\.?265|hevc)\b/.test(normalized)) return 'HEVC';
+  if (/\b(?:x264|h\.?264|avc)\b/.test(normalized)) return 'H.264';
+  if (/\bav1\b/.test(normalized)) return 'AV1';
+
+  return '';
+}
+
+function extractAudio(text) {
+  const normalized = String(text || '').toLowerCase();
+
+  if (/\batmos\b/.test(normalized)) return 'Atmos';
+  if (/\btruehd\b/.test(normalized)) return 'TrueHD';
+  if (/\bdts\b/.test(normalized)) return 'DTS';
+  if (/\bddp?\s*5\.1\b|\beac-?3\b/.test(normalized)) return 'DD+ 5.1';
+  if (/\baac\b/.test(normalized)) return 'AAC';
+
+  return '';
+}
+
+function extractSizeBytes(text) {
+  const match = String(text || '').match(/([0-9]+(?:[.,][0-9]+)?)\s*(tb|gb|mb)\b/i);
+
+  if (!match) {
+    return null;
+  }
+
+  const value = Number(match[1].replace(',', '.'));
+  const unit = match[2].toLowerCase();
+  const multiplier = unit === 'tb' ? 1024 ** 4 : unit === 'gb' ? 1024 ** 3 : 1024 ** 2;
+
+  return Math.round(value * multiplier);
+}
+
+function extractSizeText(text) {
+  const match = String(text || '').match(/([0-9]+(?:[.,][0-9]+)?\s*(?:tb|gb|mb))\b/i);
+  return match ? match[1].replace(',', '.') : '';
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return '';
+  }
+
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let size = bytes;
+  let unitIndex = 0;
+
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+
+  return `${size.toFixed(size >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+}
+
+function parseHumanNumber(value) {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return Math.max(0, Math.round(value));
+  }
+
+  const match = String(value).trim().match(/^([0-9]+(?:[.,][0-9]+)?)\s*([kKmM])?$/);
+
+  if (!match) {
+    return null;
+  }
+
+  const base = Number(match[1].replace(',', '.'));
+  const suffix = (match[2] || '').toLowerCase();
+  const multiplier = suffix === 'm' ? 1_000_000 : suffix === 'k' ? 1_000 : 1;
+
+  return Math.max(0, Math.round(base * multiplier));
+}
+
+function pickNumber(...values) {
+  for (const value of values) {
+    const number = parseHumanNumber(value);
+    if (number !== null) {
+      return number;
+    }
+  }
+
+  return null;
+}
+
+function extractInfoHash(value) {
+  const match = String(value || '').match(/(?:btih:|xt=urn:btih:)([a-f0-9]{40}|[a-z2-7]{32})/i);
+  return match ? match[1].toLowerCase() : '';
+}
+
+function sendJson(res, statusCode, body) {
+  res.writeHead(statusCode, {
+    'access-control-allow-origin': '*',
+    'access-control-allow-headers': '*',
+    'access-control-allow-methods': 'GET, OPTIONS',
+    'content-type': 'application/json; charset=utf-8'
+  });
+
+  if (statusCode === 204) {
+    return res.end();
+  }
+
+  return res.end(JSON.stringify(body));
+}
+
+function unpack(token) {
+  return Buffer.from(reverse(token), 'base64').toString('utf8');
+}
+
+function reverse(value) {
+  return String(value).split('').reverse().join('');
+}
+
+function normalizePublicUrl(value) {
+  if (!value) {
+    return '';
+  }
+
+  return String(value).replace(/\/+$/, '');
+}
+
+function getBaseUrl(req) {
+  if (PUBLIC_URL) {
+    return PUBLIC_URL;
+  }
+
+  const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+  const forwardedHost = String(req.headers['x-forwarded-host'] || '').split(',')[0].trim();
+  const protocol = forwardedProto || 'http';
+  const host = forwardedHost || req.headers.host || `localhost:${PORT}`;
+
+  return normalizePublicUrl(`${protocol}://${host}`);
+}
