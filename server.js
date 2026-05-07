@@ -33,6 +33,14 @@ const DEFAULT_TRACKERS = [
 ];
 const ASSET_DIR = path.join(__dirname, 'assets');
 const ASSETS = {
+  '/logo.png': {
+    file: 'logo-512.png',
+    contentType: 'image/png'
+  },
+  '/icon.png': {
+    file: 'logo-256.png',
+    contentType: 'image/png'
+  },
   '/assets/logo.png': {
     file: 'logo-512.png',
     contentType: 'image/png'
@@ -58,9 +66,9 @@ let fallbackLogoBuffer;
 
 const baseManifest = {
   id: 'community.astralflow.private',
-  version: '1.0.0',
+  version: '1.0.2',
   name: ADDON_NAME,
-  description: 'Streams sorted by peers and quality.',
+  description: 'Streams sorted by seeders and quality.',
   resources: ['stream'],
   types: ['movie', 'series'],
   catalogs: [],
@@ -147,7 +155,8 @@ function buildManifest(req) {
 
   return {
     ...baseManifest,
-    logo: `${baseUrl}/assets/logo.png`
+    logo: `${baseUrl}/logo.png`,
+    background: `${baseUrl}/assets/logo-original.png`
   };
 }
 
@@ -237,8 +246,8 @@ function normalizeStream(rawStream) {
   const stream = { ...rawStream };
   const meta = analyzeStream(stream);
   const quality = qualityLabel(meta.quality);
-  const peerText = meta.peers !== null ? `${meta.peers} peers` : 'peers unavailable';
-  const titleParts = [`${quality} | ${peerText}`];
+  const swarmText = formatSwarm(meta);
+  const titleParts = [`${quality} | ${swarmText}`];
 
   attachDefaultTrackers(stream);
 
@@ -254,7 +263,7 @@ function normalizeStream(rawStream) {
     titleParts.push(meta.audio);
   }
 
-  stream.name = `${ADDON_NAME} ${quality} | ${peerText}`;
+  stream.name = `${ADDON_NAME} ${quality} | ${swarmText}`;
   stream.title = titleParts.join('\n');
   stream.behaviorHints = {
     ...(stream.behaviorHints || {}),
@@ -265,7 +274,8 @@ function normalizeStream(rawStream) {
 
   return {
     stream,
-    peers: meta.peers ?? 0,
+    seeders: meta.seeders ?? 0,
+    leechers: meta.leechers ?? 0,
     quality: meta.quality ?? 0,
     size: meta.size ?? 0
   };
@@ -290,7 +300,7 @@ function analyzeStream(stream) {
   );
 
   return {
-    peers: extractPeers(stream, text),
+    ...extractSwarm(stream, text),
     quality: extractQuality(text),
     size,
     sizeText: size ? formatBytes(size) : extractSizeText(text),
@@ -300,9 +310,10 @@ function analyzeStream(stream) {
 }
 
 function compareStreams(left, right) {
-  return right.peers - left.peers ||
+  return right.seeders - left.seeders ||
     right.quality - left.quality ||
     right.size - left.size ||
+    left.leechers - right.leechers ||
     stableKey(left.stream).localeCompare(stableKey(right.stream));
 }
 
@@ -354,8 +365,8 @@ function buildStreamUrl(manifestUrl, type, id) {
   return target.toString();
 }
 
-function extractPeers(stream, text) {
-  const candidates = [
+function extractSwarm(stream, text) {
+  const seeders = firstNumber([
     stream.seeders,
     stream.seeds,
     stream.peers,
@@ -363,23 +374,72 @@ function extractPeers(stream, text) {
     stream.behaviorHints && stream.behaviorHints.seeders,
     stream.behaviorHints && stream.behaviorHints.seeds,
     stream.behaviorHints && stream.behaviorHints.peers
+  ]);
+
+  const leechers = firstNumber([
+    stream.leechers,
+    stream.leeches,
+    stream.leech,
+    stream.behaviorHints && stream.behaviorHints.leechers,
+    stream.behaviorHints && stream.behaviorHints.leeches,
+    stream.behaviorHints && stream.behaviorHints.leech
+  ]);
+
+  const textSwarm = extractSwarmFromText(text);
+
+  return {
+    seeders: seeders ?? textSwarm.seeders,
+    leechers: leechers ?? textSwarm.leechers
+  };
+}
+
+function extractSwarmFromText(text) {
+  const value = String(text || '');
+  const pairedPatterns = [
+    /(?:\uD83D\uDC64|\uD83D\uDC65)\s*([0-9][0-9.,]*\s*[kKmM]?)\s*:\s*([0-9][0-9.,]*\s*[kKmM]?)/i,
+    /\bS(?:eeders?|eeds?)?\s*[:=-]\s*([0-9][0-9.,]*\s*[kKmM]?)\s*(?:\||\/|,|\s+)\s*L(?:eechers?|eeches?)?\s*[:=-]\s*([0-9][0-9.,]*\s*[kKmM]?)/i,
+    /\b(?:seeders?|seeds?)\s*\/\s*(?:leechers?|leeches?)\s*[:=-]?\s*([0-9][0-9.,]*\s*[kKmM]?)\s*(?:\/|:)\s*([0-9][0-9.,]*\s*[kKmM]?)/i
   ];
 
-  for (const candidate of candidates) {
-    const number = parseHumanNumber(candidate);
+  for (const pattern of pairedPatterns) {
+    const match = value.match(pattern);
+
+    if (match) {
+      return {
+        seeders: parseHumanNumber(match[1]),
+        leechers: parseHumanNumber(match[2])
+      };
+    }
+  }
+
+  return {
+    seeders: firstTextNumber(value, [
+      /(?:\uD83D\uDC64|\uD83D\uDC65)\s*([0-9][0-9.,]*\s*[kKmM]?)/i,
+      /\b(?:seeders?|seeds?)\b\s*[:=-]?\s*([0-9][0-9.,]*\s*[kKmM]?)/i,
+      /([0-9][0-9.,]*\s*[kKmM]?)\s*\b(?:seeders?|seeds?)\b/i,
+      /\bS(?:eed)?\s*[:=-]\s*([0-9][0-9.,]*\s*[kKmM]?)/i
+    ]),
+    leechers: firstTextNumber(value, [
+      /\b(?:leechers?|leeches?)\b\s*[:=-]?\s*([0-9][0-9.,]*\s*[kKmM]?)/i,
+      /([0-9][0-9.,]*\s*[kKmM]?)\s*\b(?:leechers?|leeches?)\b/i,
+      /\bL(?:eech)?\s*[:=-]\s*([0-9][0-9.,]*\s*[kKmM]?)/i
+    ])
+  };
+}
+
+function firstNumber(values) {
+  for (const value of values) {
+    const number = parseHumanNumber(value);
+
     if (number !== null) {
       return number;
     }
   }
 
-  const patterns = [
-    /(?:\uD83D\uDC64|\uD83D\uDC65)\s*([0-9][0-9.,]*\s*[kKmM]?)(?::[0-9][0-9.,]*\s*[kKmM]?)?/i,
-    /(?:seeders?|seeds?|peers?)\s*\/\s*(?:leechers?|leeches?)\s*[:=-]?\s*([0-9][0-9.,]*\s*[kKmM]?)/i,
-    /\b(?:seeders?|seeds?|peers?)\b\s*[:=-]?\s*([0-9][0-9.,]*\s*[kKmM]?)/i,
-    /([0-9][0-9.,]*\s*[kKmM]?)\s*\b(?:seeders?|seeds?|peers?)\b/i,
-    /\bS(?:eed)?\s*[:=-]\s*([0-9][0-9.,]*\s*[kKmM]?)/i
-  ];
+  return null;
+}
 
+function firstTextNumber(text, patterns) {
   for (const pattern of patterns) {
     const match = text.match(pattern);
     const number = match ? parseHumanNumber(match[1]) : null;
@@ -390,6 +450,17 @@ function extractPeers(stream, text) {
   }
 
   return null;
+}
+
+function formatSwarm(meta) {
+  const seeders = meta.seeders === null || meta.seeders === undefined ? '?' : meta.seeders;
+  const leechers = meta.leechers === null || meta.leechers === undefined ? '?' : meta.leechers;
+
+  if (seeders === '?' && leechers === '?') {
+    return 'S: ? | L: ?';
+  }
+
+  return `S: ${seeders} | L: ${leechers}`;
 }
 
 function attachDefaultTrackers(stream) {
@@ -576,8 +647,8 @@ function getBaseUrl(req) {
 
   const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
   const forwardedHost = String(req.headers['x-forwarded-host'] || '').split(',')[0].trim();
-  const protocol = forwardedProto || 'http';
   const host = forwardedHost || req.headers.host || `localhost:${PORT}`;
+  const protocol = forwardedProto || (String(host).endsWith('.onrender.com') ? 'https' : 'http');
 
   return normalizePublicUrl(`${protocol}://${host}`);
 }
