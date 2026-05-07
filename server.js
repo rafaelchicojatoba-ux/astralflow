@@ -331,8 +331,9 @@ function extractPeers(stream, text) {
   }
 
   const patterns = [
-    /(?:seeders?|seeds?|peers?|s)\s*[:=-]?\s*([0-9][0-9.,]*\s*[kKmM]?)/i,
-    /([0-9][0-9.,]*\s*[kKmM]?)\s*(?:seeders?|seeds?|peers?)/i,
+    /\b(?:seeders?|seeds?|peers?)\b\s*[:=-]?\s*([0-9][0-9.,]*\s*[kKmM]?)/i,
+    /([0-9][0-9.,]*\s*[kKmM]?)\s*\b(?:seeders?|seeds?|peers?)\b/i,
+    /\bS(?:eed)?\s*[:=-]\s*([0-9][0-9.,]*\s*[kKmM]?)/,
     /(?:\uD83D\uDC64|\uD83D\uDC65)\s*([0-9][0-9.,]*\s*[kKmM]?)/i
   ];
 
