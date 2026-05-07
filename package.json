@@ -1,6 +1,6 @@
 {
   "name": "stremio-astral-flow",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "private": true,
   "description": "Private Stremio stream aggregator.",
   "main": "server.js",

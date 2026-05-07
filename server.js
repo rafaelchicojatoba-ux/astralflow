@@ -7,19 +7,17 @@ const path = require('node:path');
 const PORT = Number(process.env.PORT || 7000);
 const ADDON_NAME = 'Astral Flow';
 const PUBLIC_URL = normalizePublicUrl(process.env.PUBLIC_URL);
-const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 9000);
+const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 15000);
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 45000);
 const MAX_STREAMS = Number(process.env.MAX_STREAMS || 0);
+const FORCE_TOP_PER_SOURCE = Number(process.env.FORCE_TOP_PER_SOURCE || 5);
 
 const SOURCE_TOKENS = [
   '==gbvNnauQ3clZWauFWbv4Wdm5SblJHdz5yc1xGctkXYiVGdhJXawVGa09yL6MHc0RHa',
-  '=42bzpmL0NXZmlmbh12LiVHbj5Cc11WYlJWL5JWYi5yc05WZyJ3b01SYjVnehJnYtQmMwcjZ5I2Y4MGN58yL6MHc0RHa',
+  '=42bzpmL0NXZmlmbh12LuVnZu0WZyR3cu8Wa05WZyJ3b09yL6MHc0RHa',
   'u92cq5CdzVmZp5WYt9idlRmLzJXZrJ3b35SZsV3cwF2YjlGdjFGbhdmLvlmd0pHd59yL6MHc0RHa',
-  '=42bzpmL0NXZmlmbh12LsFmLu9mc0NWZsVmL41WYlJHdz9yL6MHc0RHa',
   '=42bzpmL0NXZmlmbh12LlRXas9CdhxmLi1meuIHdz9yL6MHc0RHa',
-  '=42bzpmL0NXZmlmbh12L2VGZuMncltmcvdnLyQnblJncvR3bu5ibvRGZh9yL6MHc0RHa',
-  '==gbvNnauQ3clZWauFWbvcmcv5SbyR3c09yL6MHc0RHa',
-  'u92cq5CdzVmZp5WYt9SbvNmLyVGZuVmcu9mLz1WYlJHdzFGb1JWZu9yL6MHc0RHa'
+  '=42bzpmL0NXZmlmbh12LsFmLu9mc0NWZsVmL41WYlJHdz9yL6MHc0RHa'
 ];
 
 const SOURCE_URLS = SOURCE_TOKENS.map(unpack);
@@ -66,7 +64,7 @@ let fallbackLogoBuffer;
 
 const baseManifest = {
   id: 'community.astralflow.private',
-  version: '1.0.8',
+  version: '1.0.9',
   name: ADDON_NAME,
   description: 'Streams sorted by seeders and quality.',
   resources: ['stream'],
@@ -129,15 +127,20 @@ async function getStreams(type, id) {
   }
 
   const settled = await Promise.allSettled(
-    SOURCE_URLS.map((sourceUrl) => fetchSourceStreams(sourceUrl, type, id))
+    SOURCE_URLS.map(async (sourceUrl, sourceIndex) => ({
+      sourceIndex,
+      streams: await fetchSourceStreams(sourceUrl, type, id)
+    }))
   );
 
   const streams = settled
-    .flatMap((result) => result.status === 'fulfilled' ? result.value : [])
-    .map(prepareStream)
+    .flatMap((result) => result.status === 'fulfilled'
+      ? result.value.streams.map((stream) => ({ stream, sourceIndex: result.value.sourceIndex }))
+      : [])
+    .map(({ stream, sourceIndex }) => prepareStream(stream, sourceIndex))
     .filter(Boolean);
 
-  const sorted = streams.sort(compareStreams);
+  const sorted = forceTopFromEachSource(streams);
   const limited = MAX_STREAMS > 0 ? sorted.slice(0, MAX_STREAMS) : sorted;
   const result = limited.map(({ stream }) => stream);
 
@@ -237,7 +240,7 @@ async function fetchSourceStreams(sourceUrl, type, id) {
   }
 }
 
-function prepareStream(rawStream) {
+function prepareStream(rawStream, sourceIndex = 0) {
   if (!rawStream || typeof rawStream !== 'object') {
     return null;
   }
@@ -277,7 +280,8 @@ function prepareStream(rawStream) {
     peers: meta.peers ?? 0,
     leechers: meta.leechers ?? 0,
     quality: meta.quality ?? 0,
-    size: meta.size ?? 0
+    size: meta.size ?? 0,
+    sourceIndex
   };
 }
 
@@ -353,6 +357,40 @@ function compareStreams(left, right) {
     right.size - left.size ||
     left.leechers - right.leechers ||
     stableKey(left.stream).localeCompare(stableKey(right.stream));
+}
+
+function forceTopFromEachSource(items) {
+  const groups = new Map();
+
+  for (const item of items) {
+    const group = groups.get(item.sourceIndex) || [];
+    group.push(item);
+    groups.set(item.sourceIndex, group);
+  }
+
+  for (const group of groups.values()) {
+    group.sort(compareStreams);
+  }
+
+  const pinned = [];
+  const pinnedSet = new Set();
+
+  for (let rank = 0; rank < FORCE_TOP_PER_SOURCE; rank += 1) {
+    for (const sourceIndex of [...groups.keys()].sort((left, right) => left - right)) {
+      const item = groups.get(sourceIndex)[rank];
+
+      if (item) {
+        pinned.push(item);
+        pinnedSet.add(item);
+      }
+    }
+  }
+
+  const rest = items
+    .filter((item) => !pinnedSet.has(item))
+    .sort(compareStreams);
+
+  return [...pinned, ...rest];
 }
 
 function stableKey(stream) {
