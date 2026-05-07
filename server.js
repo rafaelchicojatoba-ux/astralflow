@@ -66,7 +66,7 @@ let fallbackLogoBuffer;
 
 const baseManifest = {
   id: 'community.astralflow.private',
-  version: '1.0.2',
+  version: '1.0.3',
   name: ADDON_NAME,
   description: 'Streams sorted by seeders and quality.',
   resources: ['stream'],
@@ -246,7 +246,7 @@ function normalizeStream(rawStream) {
   const stream = { ...rawStream };
   const meta = analyzeStream(stream);
   const quality = qualityLabel(meta.quality);
-  const swarmText = formatSwarm(meta);
+  const swarmText = formatSwarm(meta, stream);
   const titleParts = [`${quality} | ${swarmText}`];
 
   attachDefaultTrackers(stream);
@@ -265,12 +265,31 @@ function normalizeStream(rawStream) {
 
   stream.name = `${ADDON_NAME} ${quality} | ${swarmText}`;
   stream.title = titleParts.join('\n');
+  stream.description = stream.title;
+
+  if (meta.seeders !== null && meta.seeders !== undefined) {
+    stream.seeders = meta.seeders;
+  } else {
+    delete stream.seeders;
+    delete stream.seeds;
+  }
+
+  if (meta.leechers !== null && meta.leechers !== undefined) {
+    stream.leechers = meta.leechers;
+  } else {
+    delete stream.leechers;
+    delete stream.leeches;
+    delete stream.leech;
+  }
+
   stream.behaviorHints = {
     ...(stream.behaviorHints || {}),
     bingeGroup: `sf-${meta.quality || 'auto'}-${stream.fileIdx ?? 0}`
   };
 
   delete stream.behaviorHints.filename;
+  delete stream.filename;
+  delete stream.tag;
 
   return {
     stream,
@@ -366,6 +385,16 @@ function buildStreamUrl(manifestUrl, type, id) {
 }
 
 function extractSwarm(stream, text) {
+  const pairedFields = [
+    stream.seeders,
+    stream.seeds,
+    stream.peers,
+    stream.peer,
+    stream.behaviorHints && stream.behaviorHints.seeders,
+    stream.behaviorHints && stream.behaviorHints.seeds,
+    stream.behaviorHints && stream.behaviorHints.peers
+  ].map(parseSwarmPair).find(Boolean);
+
   const seeders = firstNumber([
     stream.seeders,
     stream.seeds,
@@ -388,8 +417,25 @@ function extractSwarm(stream, text) {
   const textSwarm = extractSwarmFromText(text);
 
   return {
-    seeders: seeders ?? textSwarm.seeders,
-    leechers: leechers ?? textSwarm.leechers
+    seeders: seeders ?? pairedFields?.seeders ?? textSwarm.seeders,
+    leechers: leechers ?? pairedFields?.leechers ?? textSwarm.leechers
+  };
+}
+
+function parseSwarmPair(value) {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  const match = String(value).match(/^\s*([0-9][0-9.,]*\s*[kKmM]?)\s*(?::|\/|\|)\s*([0-9][0-9.,]*\s*[kKmM]?)\s*$/);
+
+  if (!match) {
+    return null;
+  }
+
+  return {
+    seeders: parseHumanNumber(match[1]),
+    leechers: parseHumanNumber(match[2])
   };
 }
 
@@ -452,15 +498,32 @@ function firstTextNumber(text, patterns) {
   return null;
 }
 
-function formatSwarm(meta) {
-  const seeders = meta.seeders === null || meta.seeders === undefined ? '?' : meta.seeders;
-  const leechers = meta.leechers === null || meta.leechers === undefined ? '?' : meta.leechers;
+function formatSwarm(meta, stream) {
+  const hasSeeders = meta.seeders !== null && meta.seeders !== undefined;
+  const hasLeechers = meta.leechers !== null && meta.leechers !== undefined;
 
-  if (seeders === '?' && leechers === '?') {
-    return 'S: ? | L: ?';
+  if (!hasSeeders && !hasLeechers && !isTorrentStream(stream)) {
+    return 'Direct';
   }
 
+  const seeders = hasSeeders ? meta.seeders : 'n/a';
+  const leechers = hasLeechers ? meta.leechers : 'n/a';
+
   return `S: ${seeders} | L: ${leechers}`;
+}
+
+function isTorrentStream(stream) {
+  if (stream.infoHash || extractInfoHash(stream.url || stream.externalUrl || stream.magnet || '')) {
+    return true;
+  }
+
+  if (typeof stream.magnet === 'string' && stream.magnet.startsWith('magnet:')) {
+    return true;
+  }
+
+  return Array.isArray(stream.sources) && stream.sources.some((source) => (
+    typeof source === 'string' && /^(tracker:|dht:)/i.test(source)
+  ));
 }
 
 function attachDefaultTrackers(stream) {
